@@ -22,6 +22,7 @@ function createLiveRun(overrides: Partial<LiveRunForIssue> = {}): LiveRunForIssu
 function createActiveRun(overrides: Partial<ActiveRunForIssue> = {}): ActiveRunForIssue {
   return {
     id: "run-1",
+    companyId: "company-1",
     agentId: "agent-1",
     agentName: "CodexCoder",
     adapterType: "codex_local",
