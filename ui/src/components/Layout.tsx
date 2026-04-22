@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Moon, Sun } from "lucide-react";
-import { Outlet, useLocation, useNavigate, useParams } from "@/lib/router";
+import { Outlet, useLocation, useNavigate, useNavigationType, useParams } from "@/lib/router";
 import { CompanyRail } from "./CompanyRail";
 import { Sidebar } from "./Sidebar";
-import { SidebarNavItem } from "./SidebarNavItem";
+import { InstanceSidebar } from "./InstanceSidebar";
+import { CompanySettingsSidebar } from "./CompanySettingsSidebar";
 import { BreadcrumbBar } from "./BreadcrumbBar";
 import { PropertiesPanel } from "./PropertiesPanel";
 import { CommandPalette } from "./CommandPalette";
@@ -12,38 +12,92 @@ import { NewIssueDialog } from "./NewIssueDialog";
 import { NewProjectDialog } from "./NewProjectDialog";
 import { NewGoalDialog } from "./NewGoalDialog";
 import { NewAgentDialog } from "./NewAgentDialog";
+import { KeyboardShortcutsCheatsheet } from "./KeyboardShortcutsCheatsheet";
 import { ToastViewport } from "./ToastViewport";
 import { MobileBottomNav } from "./MobileBottomNav";
+import { WorktreeBanner } from "./WorktreeBanner";
+import { DevRestartBanner } from "./DevRestartBanner";
+import { SidebarAccountMenu } from "./SidebarAccountMenu";
 import { useDialog } from "../context/DialogContext";
+import { GeneralSettingsProvider } from "../context/GeneralSettingsContext";
 import { usePanel } from "../context/PanelContext";
 import { useCompany } from "../context/CompanyContext";
 import { useSidebar } from "../context/SidebarContext";
-import { useTheme } from "../context/ThemeContext";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
 import { useCompanyPageMemory } from "../hooks/useCompanyPageMemory";
 import { healthApi } from "../api/health";
+import { instanceSettingsApi } from "../api/instanceSettings";
+import { shouldSyncCompanySelectionFromRoute } from "../lib/company-selection";
+import {
+  DEFAULT_INSTANCE_SETTINGS_PATH,
+  normalizeRememberedInstanceSettingsPath,
+} from "../lib/instance-settings";
+import {
+  resetNavigationScroll,
+  shouldResetScrollOnNavigation,
+} from "../lib/navigation-scroll";
 import { queryKeys } from "../lib/queryKeys";
+import { scheduleMainContentFocus } from "../lib/main-content-focus";
 import { cn } from "../lib/utils";
-import { Button } from "@/components/ui/button";
+import { NotFoundPage } from "../pages/NotFound";
+
+const INSTANCE_SETTINGS_MEMORY_KEY = "paperclip.lastInstanceSettingsPath";
+
+function readRememberedInstanceSettingsPath(): string {
+  if (typeof window === "undefined") return DEFAULT_INSTANCE_SETTINGS_PATH;
+  try {
+    return normalizeRememberedInstanceSettingsPath(window.localStorage.getItem(INSTANCE_SETTINGS_MEMORY_KEY));
+  } catch {
+    return DEFAULT_INSTANCE_SETTINGS_PATH;
+  }
+}
 
 export function Layout() {
   const { sidebarOpen, setSidebarOpen, toggleSidebar, isMobile } = useSidebar();
   const { openNewIssue, openOnboarding } = useDialog();
   const { togglePanelVisible } = usePanel();
-  const { companies, loading: companiesLoading, selectedCompanyId, setSelectedCompanyId } = useCompany();
-  const { theme, toggleTheme } = useTheme();
+  const {
+    companies,
+    loading: companiesLoading,
+    selectedCompany,
+    selectedCompanyId,
+    selectionSource,
+    setSelectedCompanyId,
+  } = useCompany();
   const { companyPrefix } = useParams<{ companyPrefix: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  const navigationType = useNavigationType();
+  const isInstanceSettingsRoute = location.pathname.startsWith("/instance/");
+  const isCompanySettingsRoute = location.pathname.includes("/company/settings");
   const onboardingTriggered = useRef(false);
   const lastMainScrollTop = useRef(0);
+  const previousPathname = useRef<string | null>(null);
+  const mainContentRef = useRef<HTMLElement | null>(null);
   const [mobileNavVisible, setMobileNavVisible] = useState(true);
-  const nextTheme = theme === "dark" ? "light" : "dark";
+  const [instanceSettingsTarget, setInstanceSettingsTarget] = useState<string>(() => readRememberedInstanceSettingsPath());
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const matchedCompany = useMemo(() => {
+    if (!companyPrefix) return null;
+    const requestedPrefix = companyPrefix.toUpperCase();
+    return companies.find((company) => company.issuePrefix.toUpperCase() === requestedPrefix) ?? null;
+  }, [companies, companyPrefix]);
+  const hasUnknownCompanyPrefix =
+    Boolean(companyPrefix) && !companiesLoading && companies.length > 0 && !matchedCompany;
   const { data: health } = useQuery({
     queryKey: queryKeys.health,
     queryFn: () => healthApi.get(),
     retry: false,
+    refetchInterval: (query) => {
+      const data = query.state.data as { devServer?: { enabled?: boolean } } | undefined;
+      return data?.devServer?.enabled ? 2000 : false;
+    },
+    refetchIntervalInBackground: true,
   });
+  const keyboardShortcutsEnabled = useQuery({
+    queryKey: queryKeys.instance.generalSettings,
+    queryFn: () => instanceSettingsApi.getGeneral(),
+  }).data?.keyboardShortcuts === true;
 
   useEffect(() => {
     if (companiesLoading || onboardingTriggered.current) return;
@@ -57,56 +111,63 @@ export function Layout() {
   useEffect(() => {
     if (!companyPrefix || companiesLoading || companies.length === 0) return;
 
-    const requestedPrefix = companyPrefix.toUpperCase();
-    const matched = companies.find((company) => company.issuePrefix.toUpperCase() === requestedPrefix);
-
-    if (!matched) {
-      const fallback =
-        (selectedCompanyId ? companies.find((company) => company.id === selectedCompanyId) : null)
-        ?? companies[0]!;
-      navigate(`/${fallback.issuePrefix}/dashboard`, { replace: true });
+    if (!matchedCompany) {
+      const fallback = (selectedCompanyId ? companies.find((company) => company.id === selectedCompanyId) : null)
+        ?? companies[0]
+        ?? null;
+      if (fallback && selectedCompanyId !== fallback.id) {
+        setSelectedCompanyId(fallback.id, { source: "route_sync" });
+      }
       return;
     }
 
-    if (companyPrefix !== matched.issuePrefix) {
+    if (companyPrefix !== matchedCompany.issuePrefix) {
       const suffix = location.pathname.replace(/^\/[^/]+/, "");
-      navigate(`/${matched.issuePrefix}${suffix}${location.search}`, { replace: true });
+      navigate(`/${matchedCompany.issuePrefix}${suffix}${location.search}`, { replace: true });
       return;
     }
 
-    if (selectedCompanyId !== matched.id) {
-      setSelectedCompanyId(matched.id, { source: "route_sync" });
+    if (
+      shouldSyncCompanySelectionFromRoute({
+        selectionSource,
+        selectedCompanyId,
+        routeCompanyId: matchedCompany.id,
+      })
+    ) {
+      setSelectedCompanyId(matchedCompany.id, { source: "route_sync" });
     }
   }, [
     companyPrefix,
     companies,
     companiesLoading,
+    matchedCompany,
     location.pathname,
     location.search,
     navigate,
+    selectionSource,
     selectedCompanyId,
     setSelectedCompanyId,
   ]);
 
   const togglePanel = togglePanelVisible;
-
-  // Cmd+1..9 to switch companies
-  const switchCompany = useCallback(
-    (index: number) => {
-      if (index < companies.length) {
-        setSelectedCompanyId(companies[index]!.id);
-      }
-    },
-    [companies, setSelectedCompanyId],
-  );
+  const openSearch = useCallback(() => {
+    document.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "k",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    }));
+  }, []);
 
   useCompanyPageMemory();
 
   useKeyboardShortcuts({
+    enabled: keyboardShortcutsEnabled,
     onNewIssue: () => openNewIssue(),
+    onSearch: openSearch,
     onToggleSidebar: toggleSidebar,
     onTogglePanel: togglePanel,
-    onSwitchCompany: switchCompany,
+    onShowShortcuts: () => setShortcutsOpen(true),
   });
 
   useEffect(() => {
@@ -163,128 +224,189 @@ export function Layout() {
     };
   }, [isMobile, sidebarOpen, setSidebarOpen]);
 
-  const handleMainScroll = useCallback(
-    (event: UIEvent<HTMLElement>) => {
-      if (!isMobile) return;
+  const updateMobileNavVisibility = useCallback((currentTop: number) => {
+    const delta = currentTop - lastMainScrollTop.current;
 
-      const currentTop = event.currentTarget.scrollTop;
-      const delta = currentTop - lastMainScrollTop.current;
+    if (currentTop <= 24) {
+      setMobileNavVisible(true);
+    } else if (delta > 8) {
+      setMobileNavVisible(false);
+    } else if (delta < -8) {
+      setMobileNavVisible(true);
+    }
 
-      if (currentTop <= 24) {
-        setMobileNavVisible(true);
-      } else if (delta > 8) {
-        setMobileNavVisible(false);
-      } else if (delta < -8) {
-        setMobileNavVisible(true);
-      }
+    lastMainScrollTop.current = currentTop;
+  }, []);
 
-      lastMainScrollTop.current = currentTop;
-    },
-    [isMobile],
-  );
+  useEffect(() => {
+    if (!isMobile) {
+      setMobileNavVisible(true);
+      lastMainScrollTop.current = 0;
+      return;
+    }
+
+    const onScroll = () => {
+      updateMobileNavVisibility(window.scrollY || document.documentElement.scrollTop || 0);
+    };
+
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+    };
+  }, [isMobile, updateMobileNavVisibility]);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+
+    document.body.style.overflow = isMobile ? "visible" : "hidden";
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isMobile]);
+
+  useEffect(() => {
+    if (!location.pathname.startsWith("/instance/settings/")) return;
+
+    const nextPath = normalizeRememberedInstanceSettingsPath(
+      `${location.pathname}${location.search}${location.hash}`,
+    );
+    setInstanceSettingsTarget(nextPath);
+
+    try {
+      window.localStorage.setItem(INSTANCE_SETTINGS_MEMORY_KEY, nextPath);
+    } catch {
+      // Ignore storage failures in restricted environments.
+    }
+  }, [location.hash, location.pathname, location.search]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const mainContent = mainContentRef.current;
+    return scheduleMainContentFocus(mainContent);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    const shouldResetScroll = shouldResetScrollOnNavigation({
+      previousPathname: previousPathname.current,
+      pathname: location.pathname,
+      navigationType,
+      state: location.state,
+    });
+
+    previousPathname.current = location.pathname;
+
+    if (!shouldResetScroll) return;
+    resetNavigationScroll(mainContentRef.current);
+  }, [location.pathname, navigationType]);
 
   return (
-    <div className="flex h-dvh bg-background text-foreground overflow-hidden pt-[env(safe-area-inset-top)]">
+    <GeneralSettingsProvider value={{ keyboardShortcutsEnabled }}>
+      <div
+      className={cn(
+        "bg-background text-foreground pt-[env(safe-area-inset-top)]",
+        isMobile ? "min-h-dvh" : "flex h-dvh flex-col overflow-hidden",
+      )}
+      >
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[200] focus:rounded-md focus:bg-background focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         Skip to Main Content
       </a>
-      {/* Mobile backdrop */}
-      {isMobile && sidebarOpen && (
-        <button
-          type="button"
-          className="fixed inset-0 z-40 bg-black/50"
-          onClick={() => setSidebarOpen(false)}
-          aria-label="Close sidebar"
-        />
-      )}
+      <WorktreeBanner />
+      <DevRestartBanner devServer={health?.devServer} />
+      <div className={cn("min-h-0 flex-1", isMobile ? "w-full" : "flex overflow-hidden")}>
+        {isMobile && sidebarOpen && (
+          <button
+            type="button"
+            className="fixed inset-0 z-40 bg-black/50"
+            onClick={() => setSidebarOpen(false)}
+            aria-label="Close sidebar"
+          />
+        )}
 
-      {/* Combined sidebar area: company rail + inner sidebar + docs bar */}
-      {isMobile ? (
-        <div
-          className={cn(
-            "fixed inset-y-0 left-0 z-50 flex flex-col overflow-hidden pt-[env(safe-area-inset-top)] transition-transform duration-100 ease-out",
-            sidebarOpen ? "translate-x-0" : "-translate-x-full"
-          )}
-        >
-          <div className="flex flex-1 min-h-0 overflow-hidden">
-            <CompanyRail />
-            <Sidebar />
-          </div>
-          <div className="border-t border-r border-border px-3 py-2 bg-background">
-            <div className="flex items-center gap-1">
-              <SidebarNavItem
-                to="/docs"
-                label="Documentation"
-                icon={BookOpen}
-                className="flex-1 min-w-0"
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                className="text-muted-foreground shrink-0"
-                onClick={toggleTheme}
-                aria-label={`Switch to ${nextTheme} mode`}
-                title={`Switch to ${nextTheme} mode`}
-              >
-                {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-              </Button>
+        {isMobile ? (
+          <div
+            className={cn(
+              "fixed inset-y-0 left-0 z-50 flex flex-col overflow-hidden pt-[env(safe-area-inset-top)] transition-transform duration-100 ease-out",
+              sidebarOpen ? "translate-x-0" : "-translate-x-full"
+            )}
+          >
+            <div className="flex flex-1 min-h-0 overflow-hidden">
+              <CompanyRail />
+              {isInstanceSettingsRoute ? (
+                <InstanceSidebar />
+              ) : isCompanySettingsRoute ? (
+                <CompanySettingsSidebar />
+              ) : (
+                <Sidebar />
+              )}
             </div>
+            <SidebarAccountMenu
+              deploymentMode={health?.deploymentMode}
+              instanceSettingsTarget={instanceSettingsTarget}
+              version={health?.version}
+            />
           </div>
-        </div>
-      ) : (
-        <div className="flex flex-col shrink-0 h-full">
-          <div className="flex flex-1 min-h-0">
-            <CompanyRail />
-            <div
+        ) : (
+          <div className="flex h-full flex-col shrink-0">
+            <div className="flex flex-1 min-h-0">
+              <CompanyRail />
+              <div
+                className={cn(
+                  "overflow-hidden transition-[width] duration-100 ease-out",
+                  sidebarOpen ? "w-60" : "w-0"
+                )}
+              >
+                {isInstanceSettingsRoute ? (
+                  <InstanceSidebar />
+                ) : isCompanySettingsRoute ? (
+                  <CompanySettingsSidebar />
+                ) : (
+                  <Sidebar />
+                )}
+              </div>
+            </div>
+            <SidebarAccountMenu
+              deploymentMode={health?.deploymentMode}
+              instanceSettingsTarget={instanceSettingsTarget}
+              version={health?.version}
+            />
+          </div>
+        )}
+
+        <div className={cn("flex min-w-0 flex-col", isMobile ? "w-full" : "h-full flex-1")}>
+          <div
+            className={cn(
+              isMobile && "sticky top-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/85",
+            )}
+          >
+            <BreadcrumbBar />
+          </div>
+          <div className={cn(isMobile ? "block" : "flex flex-1 min-h-0")}>
+            <main
+              id="main-content"
+              ref={mainContentRef}
+              tabIndex={-1}
               className={cn(
-                "overflow-hidden transition-[width] duration-100 ease-out",
-                sidebarOpen ? "w-60" : "w-0"
+                "flex-1 p-4 outline-none md:p-6",
+                isMobile ? "overflow-visible pb-[calc(5rem+env(safe-area-inset-bottom))]" : "overflow-auto",
               )}
             >
-              <Sidebar />
-            </div>
+              {hasUnknownCompanyPrefix ? (
+                <NotFoundPage
+                  scope="invalid_company_prefix"
+                  requestedPrefix={companyPrefix ?? selectedCompany?.issuePrefix}
+                />
+              ) : (
+                <Outlet />
+              )}
+            </main>
+            <PropertiesPanel />
           </div>
-          <div className="border-t border-r border-border px-3 py-2">
-            <div className="flex items-center gap-1">
-              <SidebarNavItem
-                to="/docs"
-                label="Documentation"
-                icon={BookOpen}
-                className="flex-1 min-w-0"
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                className="text-muted-foreground shrink-0"
-                onClick={toggleTheme}
-                aria-label={`Switch to ${nextTheme} mode`}
-                title={`Switch to ${nextTheme} mode`}
-              >
-                {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Main content */}
-      <div className="flex-1 flex flex-col min-w-0 h-full">
-        <BreadcrumbBar />
-        <div className="flex flex-1 min-h-0">
-          <main
-            id="main-content"
-            tabIndex={-1}
-            className={cn("flex-1 overflow-auto p-4 md:p-6", isMobile && "pb-[calc(5rem+env(safe-area-inset-bottom))]")}
-            onScroll={handleMainScroll}
-          >
-            <Outlet />
-          </main>
-          <PropertiesPanel />
         </div>
       </div>
       {isMobile && <MobileBottomNav visible={mobileNavVisible} />}
@@ -293,7 +415,9 @@ export function Layout() {
       <NewProjectDialog />
       <NewGoalDialog />
       <NewAgentDialog />
+      <KeyboardShortcutsCheatsheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
       <ToastViewport />
-    </div>
+      </div>
+    </GeneralSettingsProvider>
   );
 }

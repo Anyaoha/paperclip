@@ -1,10 +1,31 @@
-import type { HeartbeatRun, HeartbeatRunEvent } from "@paperclipai/shared";
+import type { HeartbeatRun, HeartbeatRunEvent, InstanceSchedulerHeartbeatAgent, WorkspaceOperation } from "@paperclipai/shared";
 import { api } from "./client";
 
-export interface ActiveRunForIssue extends HeartbeatRun {
+export interface RunLivenessFields {
+  livenessState: HeartbeatRun["livenessState"];
+  livenessReason: string | null;
+  continuationAttempt: number;
+  lastUsefulActionAt: string | Date | null;
+  nextAction: string | null;
+}
+
+export interface ActiveRunForIssue {
+  id: string;
+  status: string;
+  invocationSource: string;
+  triggerDetail: string | null;
+  startedAt: string | Date | null;
+  finishedAt: string | Date | null;
+  createdAt: string | Date;
   agentId: string;
   agentName: string;
   adapterType: string;
+  issueId?: string | null;
+  livenessState?: RunLivenessFields["livenessState"];
+  livenessReason?: string | null;
+  continuationAttempt?: number;
+  lastUsefulActionAt?: string | Date | null;
+  nextAction?: string | null;
 }
 
 export interface LiveRunForIssue {
@@ -19,6 +40,11 @@ export interface LiveRunForIssue {
   agentName: string;
   adapterType: string;
   issueId?: string | null;
+  livenessState?: RunLivenessFields["livenessState"];
+  livenessReason?: string | null;
+  continuationAttempt?: number;
+  lastUsefulActionAt?: string | null;
+  nextAction?: string | null;
 }
 
 export const heartbeatsApi = {
@@ -29,6 +55,7 @@ export const heartbeatsApi = {
     const qs = searchParams.toString();
     return api.get<HeartbeatRun[]>(`/companies/${companyId}/heartbeat-runs${qs ? `?${qs}` : ""}`);
   },
+  get: (runId: string) => api.get<HeartbeatRun>(`/heartbeat-runs/${runId}`),
   events: (runId: string, afterSeq = 0, limit = 200) =>
     api.get<HeartbeatRunEvent[]>(
       `/heartbeat-runs/${runId}/events?afterSeq=${encodeURIComponent(String(afterSeq))}&limit=${encodeURIComponent(String(limit))}`,
@@ -37,6 +64,12 @@ export const heartbeatsApi = {
     api.get<{ runId: string; store: string; logRef: string; content: string; nextOffset?: number }>(
       `/heartbeat-runs/${runId}/log?offset=${encodeURIComponent(String(offset))}&limitBytes=${encodeURIComponent(String(limitBytes))}`,
     ),
+  workspaceOperations: (runId: string) =>
+    api.get<WorkspaceOperation[]>(`/heartbeat-runs/${runId}/workspace-operations`),
+  workspaceOperationLog: (operationId: string, offset = 0, limitBytes = 256000) =>
+    api.get<{ operationId: string; store: string; logRef: string; content: string; nextOffset?: number }>(
+      `/workspace-operations/${operationId}/log?offset=${encodeURIComponent(String(offset))}&limitBytes=${encodeURIComponent(String(limitBytes))}`,
+    ),
   cancel: (runId: string) => api.post<void>(`/heartbeat-runs/${runId}/cancel`, {}),
   liveRunsForIssue: (issueId: string) =>
     api.get<LiveRunForIssue[]>(`/issues/${issueId}/live-runs`),
@@ -44,4 +77,6 @@ export const heartbeatsApi = {
     api.get<ActiveRunForIssue | null>(`/issues/${issueId}/active-run`),
   liveRunsForCompany: (companyId: string, minCount?: number) =>
     api.get<LiveRunForIssue[]>(`/companies/${companyId}/live-runs${minCount ? `?minCount=${minCount}` : ""}`),
+  listInstanceSchedulerAgents: () =>
+    api.get<InstanceSchedulerHeartbeatAgent[]>("/instance/scheduler-heartbeats"),
 };

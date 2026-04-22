@@ -1,11 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
+import { bootstrapCeoInvite } from "./auth-bootstrap-ceo.js";
 import { onboard } from "./onboard.js";
 import { doctor } from "./doctor.js";
+import { loadPaperclipEnvFile } from "../config/env.js";
 import { configExists, resolveConfigPath } from "../config/store.js";
+import type { PaperclipConfig } from "../config/schema.js";
+import { readConfig } from "../config/store.js";
 import {
   describeLocalInstancePaths,
   resolvePaperclipHomeDir,
@@ -17,6 +22,14 @@ interface RunOptions {
   instance?: string;
   repair?: boolean;
   yes?: boolean;
+  bind?: "loopback" | "lan" | "tailnet";
+}
+
+interface StartedServer {
+  apiUrl: string;
+  databaseUrl: string;
+  host: string;
+  listenPort: number;
 }
 
 export async function runCommand(opts: RunOptions): Promise<void> {
@@ -31,6 +44,7 @@ export async function runCommand(opts: RunOptions): Promise<void> {
 
   const configPath = resolveConfigPath(opts.config);
   process.env.PAPERCLIP_CONFIG = configPath;
+  loadPaperclipEnvFile(configPath);
 
   p.intro(pc.bgCyan(pc.black(" paperclipai run ")));
   p.log.message(pc.dim(`Home: ${paths.homeDir}`));
@@ -45,7 +59,7 @@ export async function runCommand(opts: RunOptions): Promise<void> {
     }
 
     p.log.step("No config found. Starting onboarding...");
-    await onboard({ config: configPath, invokedByRun: true });
+    await onboard({ config: configPath, invokedByRun: true, bind: opts.bind });
   }
 
   p.log.step("Running doctor checks...");
@@ -60,8 +74,41 @@ export async function runCommand(opts: RunOptions): Promise<void> {
     process.exit(1);
   }
 
+  const config = readConfig(configPath);
+  if (!config) {
+    p.log.error(`No config found at ${configPath}.`);
+    process.exit(1);
+  }
+
   p.log.step("Starting Paperclip server...");
-  await importServerEntry();
+  const startedServer = await importServerEntry();
+
+  if (shouldGenerateBootstrapInviteAfterStart(config)) {
+    p.log.step("Generating bootstrap CEO invite");
+    await bootstrapCeoInvite({
+      config: configPath,
+      dbUrl: startedServer.databaseUrl,
+      baseUrl: resolveBootstrapInviteBaseUrl(config, startedServer),
+    });
+  }
+}
+
+function resolveBootstrapInviteBaseUrl(
+  config: PaperclipConfig,
+  startedServer: StartedServer,
+): string {
+  const explicitBaseUrl =
+    process.env.PAPERCLIP_PUBLIC_URL ??
+    process.env.PAPERCLIP_AUTH_PUBLIC_BASE_URL ??
+    process.env.BETTER_AUTH_URL ??
+    process.env.BETTER_AUTH_BASE_URL ??
+    (config.auth.baseUrlMode === "explicit" ? config.auth.publicBaseUrl : undefined);
+
+  if (typeof explicitBaseUrl === "string" && explicitBaseUrl.trim().length > 0) {
+    return explicitBaseUrl.trim().replace(/\/+$/, "");
+  }
+
+  return startedServer.apiUrl.replace(/\/api$/, "");
 }
 
 function formatError(err: unknown): string {
@@ -101,19 +148,44 @@ function maybeEnableUiDevMiddleware(entrypoint: string): void {
   }
 }
 
-async function importServerEntry(): Promise<void> {
+function ensureDevWorkspaceBuildDeps(projectRoot: string): void {
+  const buildScript = path.resolve(projectRoot, "scripts/ensure-plugin-build-deps.mjs");
+  if (!fs.existsSync(buildScript)) return;
+
+  const result = spawnSync(process.execPath, [buildScript], {
+    cwd: projectRoot,
+    stdio: "inherit",
+    timeout: 120_000,
+  });
+
+  if (result.error) {
+    throw new Error(
+      `Failed to prepare workspace build artifacts before starting the Paperclip dev server.\n${formatError(result.error)}`,
+    );
+  }
+
+  if ((result.status ?? 1) !== 0) {
+    throw new Error(
+      "Failed to prepare workspace build artifacts before starting the Paperclip dev server.",
+    );
+  }
+}
+
+async function importServerEntry(): Promise<StartedServer> {
   // Dev mode: try local workspace path (monorepo with tsx)
   const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
   const devEntry = path.resolve(projectRoot, "server/src/index.ts");
   if (fs.existsSync(devEntry)) {
+    ensureDevWorkspaceBuildDeps(projectRoot);
     maybeEnableUiDevMiddleware(devEntry);
-    await import(pathToFileURL(devEntry).href);
-    return;
+    const mod = await import(pathToFileURL(devEntry).href);
+    return await startServerFromModule(mod, devEntry);
   }
 
   // Production mode: import the published @paperclipai/server package
   try {
-    await import("@paperclipai/server");
+    const mod = await import("@paperclipai/server");
+    return await startServerFromModule(mod, "@paperclipai/server");
   } catch (err) {
     const missingSpecifier = getMissingModuleSpecifier(err);
     const missingServerEntrypoint = !missingSpecifier || missingSpecifier === "@paperclipai/server";
@@ -129,4 +201,16 @@ async function importServerEntry(): Promise<void> {
         `${formatError(err)}`,
     );
   }
+}
+
+function shouldGenerateBootstrapInviteAfterStart(config: PaperclipConfig): boolean {
+  return config.server.deploymentMode === "authenticated" && config.database.mode === "embedded-postgres";
+}
+
+async function startServerFromModule(mod: unknown, label: string): Promise<StartedServer> {
+  const startServer = (mod as { startServer?: () => Promise<StartedServer> }).startServer;
+  if (typeof startServer !== "function") {
+    throw new Error(`Paperclip server entrypoint did not export startServer(): ${label}`);
+  }
+  return await startServer();
 }

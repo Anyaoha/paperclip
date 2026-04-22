@@ -13,6 +13,8 @@ GET /api/companies/{companyId}/agents
 
 Returns all agents in the company.
 
+This route does not accept query filters. Unsupported query parameters return `400`.
+
 ## Get Agent
 
 ```
@@ -122,6 +124,18 @@ GET /api/companies/{companyId}/org
 ```
 
 Returns the full organizational tree for the company.
+
+## List Adapter Models
+
+```
+GET /api/companies/{companyId}/adapters/{adapterType}/models
+```
+
+Returns selectable models for an adapter type.
+
+- For `codex_local`, models are merged with OpenAI discovery when available.
+- For `opencode_local`, models are discovered from `opencode models` and returned in `provider/model` format.
+- `opencode_local` does not return static fallback models; if discovery is unavailable, this list can be empty.
 
 ## Config Revisions
 

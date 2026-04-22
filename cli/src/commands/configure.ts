@@ -54,6 +54,7 @@ function defaultConfig(): PaperclipConfig {
     server: {
       deploymentMode: "local_trusted",
       exposure: "private",
+      bind: "loopback",
       host: "127.0.0.1",
       port: 3100,
       allowedHostnames: [],
@@ -61,6 +62,10 @@ function defaultConfig(): PaperclipConfig {
     },
     auth: {
       baseUrlMode: "auto",
+      disableSignUp: false,
+    },
+    telemetry: {
+      enabled: true,
     },
     storage: defaultStorageConfig(),
     secrets: defaultSecretsConfig(),

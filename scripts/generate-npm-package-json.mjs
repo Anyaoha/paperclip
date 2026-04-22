@@ -32,11 +32,12 @@ const workspacePaths = [
   "packages/adapter-utils",
   "packages/adapters/claude-local",
   "packages/adapters/codex-local",
-  "packages/adapters/openclaw",
+  "packages/adapters/opencode-local",
+  "packages/adapters/openclaw-gateway",
 ];
 
 // Workspace packages that are NOT bundled and must stay as npm dependencies.
-// These get published separately via Changesets and resolved at runtime.
+// These get published separately and resolved at runtime.
 const externalWorkspacePackages = new Set([
   "@paperclipai/server",
 ]);
@@ -56,7 +57,7 @@ for (const pkgPath of workspacePaths) {
     if (externalWorkspacePackages.has(name)) {
       const pkgDirMap = { "@paperclipai/server": "server" };
       const wsPkg = readPkg(pkgDirMap[name]);
-      allDeps[name] = `^${wsPkg.version}`;
+      allDeps[name] = wsPkg.version;
       continue;
     }
     // Keep the more specific (pinned) version if conflict
@@ -93,6 +94,7 @@ const publishPkg = {
   license: cliPkg.license,
   repository: cliPkg.repository,
   homepage: cliPkg.homepage,
+  bugs: cliPkg.bugs,
   files: cliPkg.files,
   engines: { node: ">=20" },
   dependencies: sortedDeps,

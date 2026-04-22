@@ -1,4 +1,4 @@
-import type { TranscriptEntry } from "@paperclipai/adapter-utils";
+import { type TranscriptEntry } from "@paperclipai/adapter-utils";
 
 function safeJsonParse(text: string): unknown {
   try {
@@ -57,6 +57,7 @@ function parseCommandExecutionItem(
   const command = asString(item.command);
   const status = asString(item.status);
   const exitCode = typeof item.exit_code === "number" && Number.isFinite(item.exit_code) ? item.exit_code : null;
+  const safeCommand = command;
   const output = asString(item.aggregated_output).replace(/\s+$/, "");
 
   if (phase === "started") {
@@ -64,15 +65,16 @@ function parseCommandExecutionItem(
       kind: "tool_call",
       ts,
       name: "command_execution",
+      toolUseId: id || command || "command_execution",
       input: {
         id,
-        command,
+        command: safeCommand,
       },
     }];
   }
 
   const lines: string[] = [];
-  if (command) lines.push(`command: ${command}`);
+  if (safeCommand) lines.push(`command: ${safeCommand}`);
   if (status) lines.push(`status: ${status}`);
   if (exitCode !== null) lines.push(`exit_code: ${exitCode}`);
   if (output) {
@@ -116,6 +118,52 @@ function parseFileChangeItem(item: Record<string, unknown>, ts: string): Transcr
   return [{ kind: "system", ts, text: `file changes: ${preview}${more}` }];
 }
 
+function parseToolUseItem(
+  item: Record<string, unknown>,
+  ts: string,
+  phase: "started" | "completed",
+): TranscriptEntry[] {
+  const name = asString(item.name, "unknown");
+  const toolUseId = asString(item.id, name || "tool_use");
+
+  if (phase === "started") {
+    return [{
+      kind: "tool_call",
+      ts,
+      name,
+      toolUseId,
+      input: item.input ?? {},
+    }];
+  }
+
+  const status = asString(item.status);
+  const isError =
+    item.is_error === true ||
+    status === "failed" ||
+    status === "errored" ||
+    status === "error" ||
+    status === "cancelled";
+  const rawContent =
+    item.content ??
+    item.output ??
+    item.result ??
+    item.error ??
+    item.message;
+  const content =
+    asString(rawContent) ||
+    errorText(rawContent) ||
+    stringifyUnknown(rawContent) ||
+    `${name} ${isError ? "failed" : "completed"}`;
+
+  return [{
+    kind: "tool_result",
+    ts,
+    toolUseId,
+    content,
+    isError,
+  }];
+}
+
 function parseCodexItem(
   item: Record<string, unknown>,
   ts: string,
@@ -144,12 +192,7 @@ function parseCodexItem(
   }
 
   if (itemType === "tool_use") {
-    return [{
-      kind: "tool_call",
-      ts,
-      name: asString(item.name, "unknown"),
-      input: item.input ?? {},
-    }];
+    return parseToolUseItem(item, ts, phase);
   }
 
   if (itemType === "tool_result" && phase === "completed") {
@@ -171,7 +214,11 @@ function parseCodexItem(
   const id = asString(item.id);
   const status = asString(item.status);
   const meta = [id ? `id=${id}` : "", status ? `status=${status}` : ""].filter(Boolean).join(" ");
-  return [{ kind: "system", ts, text: `item ${phase}: ${itemType || "unknown"}${meta ? ` (${meta})` : ""}` }];
+  return [{
+    kind: "system",
+    ts,
+    text: `item ${phase}: ${itemType || "unknown"}${meta ? ` (${meta})` : ""}`,
+  }];
 }
 
 export function parseCodexStdoutLine(line: string, ts: string): TranscriptEntry[] {

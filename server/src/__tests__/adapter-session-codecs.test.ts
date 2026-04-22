@@ -6,6 +6,10 @@ import {
   isCursorUnknownSessionError,
 } from "@paperclipai/adapter-cursor-local/server";
 import {
+  sessionCodec as geminiSessionCodec,
+  isGeminiUnknownSessionError,
+} from "@paperclipai/adapter-gemini-local/server";
+import {
   sessionCodec as opencodeSessionCodec,
   isOpenCodeUnknownSessionError,
 } from "@paperclipai/adapter-opencode-local/server";
@@ -15,16 +19,19 @@ describe("adapter session codecs", () => {
     const parsed = claudeSessionCodec.deserialize({
       session_id: "claude-session-1",
       folder: "/tmp/workspace",
+      prompt_bundle_key: "bundle-1",
     });
     expect(parsed).toEqual({
       sessionId: "claude-session-1",
       cwd: "/tmp/workspace",
+      promptBundleKey: "bundle-1",
     });
 
     const serialized = claudeSessionCodec.serialize(parsed);
     expect(serialized).toEqual({
       sessionId: "claude-session-1",
       cwd: "/tmp/workspace",
+      promptBundleKey: "bundle-1",
     });
     expect(claudeSessionCodec.getDisplayId?.(serialized ?? null)).toBe("claude-session-1");
   });
@@ -81,6 +88,24 @@ describe("adapter session codecs", () => {
       cwd: "/tmp/cursor",
     });
     expect(cursorSessionCodec.getDisplayId?.(serialized ?? null)).toBe("cursor-session-1");
+  });
+
+  it("normalizes gemini session params with cwd", () => {
+    const parsed = geminiSessionCodec.deserialize({
+      session_id: "gemini-session-1",
+      cwd: "/tmp/gemini",
+    });
+    expect(parsed).toEqual({
+      sessionId: "gemini-session-1",
+      cwd: "/tmp/gemini",
+    });
+
+    const serialized = geminiSessionCodec.serialize(parsed);
+    expect(serialized).toEqual({
+      sessionId: "gemini-session-1",
+      cwd: "/tmp/gemini",
+    });
+    expect(geminiSessionCodec.getDisplayId?.(serialized ?? null)).toBe("gemini-session-1");
   });
 });
 
@@ -140,6 +165,29 @@ describe("cursor resume recovery detection", () => {
     ).toBe(true);
     expect(
       isCursorUnknownSessionError(
+        "{\"type\":\"result\",\"subtype\":\"success\"}",
+        "",
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("gemini resume recovery detection", () => {
+  it("detects unknown session errors from gemini output", () => {
+    expect(
+      isGeminiUnknownSessionError(
+        "",
+        "unknown session id abc",
+      ),
+    ).toBe(true);
+    expect(
+      isGeminiUnknownSessionError(
+        "",
+        "checkpoint latest not found",
+      ),
+    ).toBe(true);
+    expect(
+      isGeminiUnknownSessionError(
         "{\"type\":\"result\",\"subtype\":\"success\"}",
         "",
       ),

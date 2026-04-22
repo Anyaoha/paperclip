@@ -11,6 +11,7 @@ import {
   authVerifications,
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
+import { resolvePaperclipInstanceId } from "../home-paths.js";
 
 export type BetterAuthSessionUser = {
   id: string;
@@ -24,6 +25,24 @@ export type BetterAuthSessionResult = {
 };
 
 type BetterAuthInstance = ReturnType<typeof betterAuth>;
+
+const AUTH_COOKIE_PREFIX_FALLBACK = "default";
+const AUTH_COOKIE_PREFIX_INVALID_SEGMENTS_RE = /[^a-zA-Z0-9_-]+/g;
+
+export function deriveAuthCookiePrefix(instanceId = resolvePaperclipInstanceId()): string {
+  const scopedInstanceId = instanceId
+    .trim()
+    .replace(AUTH_COOKIE_PREFIX_INVALID_SEGMENTS_RE, "-")
+    .replace(/^-+|-+$/g, "") || AUTH_COOKIE_PREFIX_FALLBACK;
+  return `paperclip-${scopedInstanceId}`;
+}
+
+export function buildBetterAuthAdvancedOptions(input: { disableSecureCookies: boolean }) {
+  return {
+    cookiePrefix: deriveAuthCookiePrefix(),
+    ...(input.disableSecureCookies ? { useSecureCookies: false } : {}),
+  };
+}
 
 function headersFromNodeHeaders(rawHeaders: IncomingHttpHeaders): Headers {
   const headers = new Headers();
@@ -42,13 +61,47 @@ function headersFromExpressRequest(req: Request): Headers {
   return headersFromNodeHeaders(req.headers);
 }
 
-export function createBetterAuthInstance(db: Db, config: Config): BetterAuthInstance {
+export function deriveAuthTrustedOrigins(config: Config): string[] {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
-  const secret = process.env.BETTER_AUTH_SECRET ?? process.env.PAPERCLIP_AGENT_JWT_SECRET ?? "paperclip-dev-secret";
+  const trustedOrigins = new Set<string>();
+
+  if (baseUrl) {
+    try {
+      trustedOrigins.add(new URL(baseUrl).origin);
+    } catch {
+      // Better Auth will surface invalid base URL separately.
+    }
+  }
+  if (config.deploymentMode === "authenticated") {
+    for (const hostname of config.allowedHostnames) {
+      const trimmed = hostname.trim().toLowerCase();
+      if (!trimmed) continue;
+      trustedOrigins.add(`https://${trimmed}`);
+      trustedOrigins.add(`http://${trimmed}`);
+    }
+  }
+
+  return Array.from(trustedOrigins);
+}
+
+export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins?: string[]): BetterAuthInstance {
+  const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
+  const secret = process.env.BETTER_AUTH_SECRET ?? process.env.PAPERCLIP_AGENT_JWT_SECRET;
+  if (!secret) {
+    throw new Error(
+      "BETTER_AUTH_SECRET (or PAPERCLIP_AGENT_JWT_SECRET) must be set. " +
+      "For local development, set BETTER_AUTH_SECRET=paperclip-dev-secret in your .env file.",
+    );
+  }
+  const effectiveTrustedOrigins = trustedOrigins ?? deriveAuthTrustedOrigins(config);
+
+  const publicUrl = process.env.PAPERCLIP_PUBLIC_URL ?? baseUrl;
+  const isHttpOnly = publicUrl ? publicUrl.startsWith("http://") : false;
 
   const authConfig = {
     baseURL: baseUrl,
     secret,
+    trustedOrigins: effectiveTrustedOrigins,
     database: drizzleAdapter(db, {
       provider: "pg",
       schema: {
@@ -61,7 +114,9 @@ export function createBetterAuthInstance(db: Db, config: Config): BetterAuthInst
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,
+      disableSignUp: config.authDisableSignUp,
     },
+    advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies: isHttpOnly }),
   };
 
   if (!baseUrl) {

@@ -1,3 +1,11 @@
+export interface DashboardRunActivityDay {
+  date: string;
+  succeeded: number;
+  failed: number;
+  other: number;
+  total: number;
+}
+
 export interface DashboardSummary {
   companyId: string;
   agents: {
@@ -18,5 +26,11 @@ export interface DashboardSummary {
     monthUtilizationPercent: number;
   };
   pendingApprovals: number;
-  staleTasks: number;
+  budgets: {
+    activeIncidents: number;
+    pendingApprovals: number;
+    pausedAgents: number;
+    pausedProjects: number;
+  };
+  runActivity: DashboardRunActivityDay[];
 }

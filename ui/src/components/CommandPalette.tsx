@@ -3,6 +3,7 @@ import { useNavigate } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import { useCompany } from "../context/CompanyContext";
 import { useDialog } from "../context/DialogContext";
+import { useSidebar } from "../context/SidebarContext";
 import { issuesApi } from "../api/issues";
 import { agentsApi } from "../api/agents";
 import { projectsApi } from "../api/projects";
@@ -37,6 +38,7 @@ export function CommandPalette() {
   const navigate = useNavigate();
   const { selectedCompanyId } = useCompany();
   const { openNewIssue, openNewAgent } = useDialog();
+  const { isMobile, setSidebarOpen } = useSidebar();
   const searchQuery = query.trim();
 
   useEffect(() => {
@@ -44,11 +46,12 @@ export function CommandPalette() {
       if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         setOpen(true);
+        if (isMobile) setSidebarOpen(false);
       }
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [isMobile, setSidebarOpen]);
 
   useEffect(() => {
     if (!open) setQuery("");
@@ -57,12 +60,12 @@ export function CommandPalette() {
   const { data: issues = [] } = useQuery({
     queryKey: queryKeys.issues.list(selectedCompanyId!),
     queryFn: () => issuesApi.list(selectedCompanyId!),
-    enabled: !!selectedCompanyId && open,
+    enabled: !!selectedCompanyId && open && searchQuery.length === 0,
   });
 
   const { data: searchedIssues = [] } = useQuery({
-    queryKey: queryKeys.issues.search(selectedCompanyId!, searchQuery),
-    queryFn: () => issuesApi.list(selectedCompanyId!, { q: searchQuery }),
+    queryKey: queryKeys.issues.search(selectedCompanyId!, searchQuery, undefined, 10),
+    queryFn: () => issuesApi.list(selectedCompanyId!, { q: searchQuery, limit: 10, includeRoutineExecutions: true }),
     enabled: !!selectedCompanyId && open && searchQuery.length > 0,
   });
 
@@ -72,11 +75,15 @@ export function CommandPalette() {
     enabled: !!selectedCompanyId && open,
   });
 
-  const { data: projects = [] } = useQuery({
+  const { data: allProjects = [] } = useQuery({
     queryKey: queryKeys.projects.list(selectedCompanyId!),
     queryFn: () => projectsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId && open,
   });
+  const projects = useMemo(
+    () => allProjects.filter((p) => !p.archivedAt),
+    [allProjects],
+  );
 
   function go(path: string) {
     setOpen(false);
@@ -94,7 +101,10 @@ export function CommandPalette() {
   );
 
   return (
-    <CommandDialog open={open} onOpenChange={setOpen}>
+    <CommandDialog open={open} onOpenChange={(v) => {
+        setOpen(v);
+        if (v && isMobile) setSidebarOpen(false);
+      }}>
       <CommandInput
         placeholder="Search issues, agents, projects..."
         value={query}
@@ -187,7 +197,7 @@ export function CommandPalette() {
                   <span className="flex-1 truncate">{issue.title}</span>
                   {issue.assigneeAgentId && (() => {
                     const name = agentName(issue.assigneeAgentId);
-                    return name ? <Identity name={name} size="sm" className="ml-2" /> : null;
+                    return name ? <Identity name={name} size="sm" className="ml-2 hidden sm:inline-flex" /> : null;
                   })()}
                 </CommandItem>
               ))}

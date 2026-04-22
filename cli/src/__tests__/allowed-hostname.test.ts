@@ -42,6 +42,10 @@ function writeBaseConfig(configPath: string) {
     },
     auth: {
       baseUrlMode: "auto",
+      disableSignUp: false,
+    },
+    telemetry: {
+      enabled: true,
     },
     storage: {
       provider: "local_disk",
